@@ -11,4 +11,4 @@ python3 ae.py
 Либо скачайте бинарники!
 
 ## Скриншоты
-![screenshot](https://ionics.neocities.org/alternet/ae.png)
+![screenshot](https://ionics.neocities.org/alternet/aescreen.jpg)
