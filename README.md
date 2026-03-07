@@ -8,7 +8,14 @@ git clone https://github.com/Michaelionin/ae.git ae
 cd ae
 python3 ae.py
 ```
-Либо скачайте бинарники!
+Либо скачайте бинарник  или пакет для RPM/DPKG!
+## Быстрый старт (другие ОС)
+```
+pip install requests commonmark pygame pyperclip
+git clone https://github.com/Michaelionin/ae.git ae
+cd ae
+python3 ae.py
+```
 
 ## Скриншоты
 ![screenshot](https://ionics.neocities.org/alternet/aescreen.jpg)
