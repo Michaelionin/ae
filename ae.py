@@ -7,6 +7,12 @@ import sys
 import time
 import requests.exceptions
 import os
+import random
+import string
+import socket
+import pyperclip
+import json
+import threading
 
 class AlternetExplorer:
     def __init__(self):
@@ -40,6 +46,10 @@ class AlternetExplorer:
         self.STATUS_BG = (192, 192, 192)  # Фон статус-бара
         self.ERROR_BG = (255, 220, 220)  # Фон для ошибок
         self.IMAGE_BORDER_COLOR = (200, 200, 200)  # Цвет рамки изображения
+        self.CONTEXT_MENU_BG = (212, 208, 200)  # Цвет фона контекстного меню Win95
+        self.CONTEXT_MENU_HOVER = (10, 36, 106)  # Темно-синий для выделения
+        self.CONTEXT_MENU_TEXT_HOVER = (255, 255, 255)  # Белый текст при наведении
+        self.OVERLAY_BG = (0, 0, 0, 180)  # Полупрозрачный черный для попапов
         
         # Параметры прокрутки
         self.scroll_offset = 0
@@ -79,7 +89,14 @@ class AlternetExplorer:
                 'button': pygame.font.SysFont('MS Sans Serif, Arial', 13),
                 'error_title': pygame.font.SysFont('MS Sans Serif, Arial', 18, bold=True),
                 'error_text': pygame.font.SysFont('MS Sans Serif, Arial', 16),
-                'image_caption': pygame.font.SysFont('MS Sans Serif, Arial', 12, italic=True)
+                'image_caption': pygame.font.SysFont('MS Sans Serif, Arial', 12, italic=True),
+                'context_menu': pygame.font.SysFont('MS Sans Serif, Arial', 14),
+                'debug_title': pygame.font.SysFont('MS Sans Serif, Arial', 20, bold=True),
+                'debug_text': pygame.font.SysFont('MS Sans Serif, Arial', 14),
+                'bookmark_title': pygame.font.SysFont('MS Sans Serif, Arial', 18, bold=True),
+                'bookmark_item': pygame.font.SysFont('MS Sans Serif, Arial', 14),
+                'bookmark_url': pygame.font.SysFont('MS Sans Serif, Arial', 11),
+                'bookmark_button': pygame.font.SysFont('MS Sans Serif, Arial', 13)
             }
         except:
             # Если не получается, используем шрифт по умолчанию
@@ -94,7 +111,14 @@ class AlternetExplorer:
                 'button': pygame.font.SysFont(None, 13),
                 'error_title': pygame.font.SysFont(None, 18, bold=True),
                 'error_text': pygame.font.SysFont(None, 16),
-                'image_caption': pygame.font.SysFont(None, 12, italic=True)
+                'image_caption': pygame.font.SysFont(None, 12, italic=True),
+                'context_menu': pygame.font.SysFont(None, 14),
+                'debug_title': pygame.font.SysFont(None, 20, bold=True),
+                'debug_text': pygame.font.SysFont(None, 14),
+                'bookmark_title': pygame.font.SysFont(None, 18, bold=True),
+                'bookmark_item': pygame.font.SysFont(None, 14),
+                'bookmark_url': pygame.font.SysFont(None, 11),
+                'bookmark_button': pygame.font.SysFont(None, 13)
             }
         
         # Устанавливаем подчеркивание для ссылок
@@ -106,6 +130,7 @@ class AlternetExplorer:
         self.back_stack = []
         self.forward_stack = []  # Добавляем стек для вперед
         self.active_areas = []  # Для хранения кликабельных областей (rect, url)
+        self.image_areas = []  # Для хранения областей изображений (rect, url, surface)
         self.parser = commonmark.Parser()
         
         # Инициализируем ast как пустой документ
@@ -122,8 +147,9 @@ class AlternetExplorer:
         self.loading = True
         self.status_message = "Инициализация..."
         
-        # Индикатор загрузки (вращающаяся буква А)
-        self.loading_indicator_angle = 0
+        # УЛУЧШЕННЫЙ индикатор загрузки (вращающаяся буква А)
+        self.loading_indicator_angle = 0.0  # Используем float для плавности
+        self.loading_indicator_pulse = 0.0  # Для pulsing эффекта
         self.loading_indicator_rect = None  # Будет установлено в update_layout
         
         # Tooltip система
@@ -132,7 +158,26 @@ class AlternetExplorer:
         self.tooltip_delay = 0.5  # Задержка перед показом tooltip (секунды)
         self.tooltip_visible = False
         
+        # Контекстное меню
+        self.context_menu_visible = False
+        self.context_menu_pos = (0, 0)
+        self.context_menu_items = []
+        self.context_menu_rects = []
+        self.context_menu_hover_index = -1
+        self.context_menu_target = None  # Что было под правым кликом
+        
+        # Попап системы
+        self.popup_active = False
+        self.popup_type = None  # 'image', 'debug' или 'bookmarks'
+        self.popup_data = None  # Данные для попапа
+        
+        # Закладки
+        self.bookmark_manager = BookmarkManager()
+        self.bookmark_hover_index = -1
+        self.bookmark_context_menu_index = -1
+        
         # Инициализация
+        self.update_layout(self.screen_width, self.screen_height)  # ИСПРАВЛЕНО: инициализируем все rect перед первым рендером
         self.render_page()  # Сначала отрисовываем начальный экран
         self.load_page(self.current_url)  # Затем загружаем страницу
     
@@ -245,26 +290,39 @@ class AlternetExplorer:
                             (cursor_x, self.url_input_rect.y + 21), 1)
     
     def draw_loading_indicator(self):
-        """Рисует индикатор загрузки - вращающуюся букву А с 3D рамкой"""
+        """УЛУЧШЕНО: Индикатор загрузки с плавным вращением и pulsing эффектом"""
         if not self.loading_indicator_rect:
             return
         
-        # ИСПРАВЛЕНО: Рисуем 3D рамку вокруг индикатора как у кнопок
+        # Рисуем 3D рамку вокруг индикатора как у кнопок
         self.draw_3d_rectangle(self.loading_indicator_rect, is_pressed=False)
         
         # Цвет индикатора: красный при загрузке, зеленый когда загружено
         indicator_color = (220, 20, 20) if self.loading else (20, 200, 20)
         
         # Создаем большой шрифт для буквы А
-        indicator_font = pygame.font.SysFont('MS Sans Serif, Arial', 20, bold=True)
+        base_size = 20
+        
+        # НОВОЕ: Pulsing эффект - размер меняется от 18 до 22
+        if self.loading:
+            pulse_factor = 1.0 + 0.1 * abs(pygame.math.Vector2(1, 0).rotate(self.loading_indicator_pulse).x)
+            current_size = int(base_size * pulse_factor)
+        else:
+            current_size = base_size
+        
+        indicator_font = pygame.font.SysFont('MS Sans Serif, Arial', current_size, bold=True)
         
         # Рендерим букву А
         text_surface = indicator_font.render('А', True, indicator_color)
         
-        # Если идет загрузка - вращаем БЫСТРЕЕ (12 градусов вместо 5)
+        # Если идет загрузка - вращаем плавно
         if self.loading:
-            # ИСПРАВЛЕНО: Увеличиваем угол вращения с 5 до 12 для более быстрой анимации
-            self.loading_indicator_angle = (self.loading_indicator_angle + 12) % 360
+            # УЛУЧШЕНО: Используем плавное вращение с float
+            # 8 градусов за кадр при 60 FPS = 480 градусов/сек = ~0.75 оборота в секунду
+            self.loading_indicator_angle = (self.loading_indicator_angle + 8.0) % 360.0
+            # Обновляем pulse
+            self.loading_indicator_pulse = (self.loading_indicator_pulse + 10.0) % 360.0
+            
             text_surface = pygame.transform.rotate(text_surface, self.loading_indicator_angle)
         
         # Центрируем букву в прямоугольнике индикатора
@@ -321,7 +379,7 @@ class AlternetExplorer:
         
         # URL под мышью
         mouse_pos = pygame.mouse.get_pos()
-        # ИСПРАВЛЕНО: учитываем прокрутку при проверке областей в статус-баре
+        # учитываем прокрутку при проверке областей в статус-баре
         adjusted_pos = (mouse_pos[0], mouse_pos[1] + self.scroll_offset)
         for rect, url in self.active_areas:
             if rect.collidepoint(adjusted_pos):
@@ -332,6 +390,522 @@ class AlternetExplorer:
                 self.screen.blit(url_surf, (self.screen_width - url_surf.get_width() - 10, self.screen_height - 23))
                 return
     
+    def draw_context_menu(self):
+        """НОВОЕ: Рисует контекстное меню в стиле Windows 95"""
+        if not self.context_menu_visible or not self.context_menu_items:
+            return
+        
+        menu_font = self.fonts['context_menu']
+        padding = 8
+        item_height = 22
+        separator_height = 6
+        
+        # Вычисляем размеры меню
+        max_width = 0
+        menu_height = padding * 2
+        
+        for item in self.context_menu_items:
+            if item == "---":  # Separator
+                menu_height += separator_height
+            else:
+                text_surf = menu_font.render(item, True, self.BUTTON_TEXT)
+                max_width = max(max_width, text_surf.get_width())
+                menu_height += item_height
+        
+        menu_width = max_width + padding * 4
+        
+        # Корректируем позицию если меню выходит за границы
+        menu_x, menu_y = self.context_menu_pos
+        if menu_x + menu_width > self.screen_width:
+            menu_x = self.screen_width - menu_width - 5
+        if menu_y + menu_height > self.screen_height:
+            menu_y = self.screen_height - menu_height - 5
+        
+        # Рисуем фон меню
+        menu_rect = pygame.Rect(menu_x, menu_y, menu_width, menu_height)
+        pygame.draw.rect(self.screen, self.CONTEXT_MENU_BG, menu_rect)
+        
+        # 3D границы
+        pygame.draw.line(self.screen, self.BUTTON_HIGHLIGHT, 
+                        (menu_x, menu_y), (menu_x + menu_width, menu_y), 2)
+        pygame.draw.line(self.screen, self.BUTTON_HIGHLIGHT, 
+                        (menu_x, menu_y), (menu_x, menu_y + menu_height), 2)
+        pygame.draw.line(self.screen, (64, 64, 64), 
+                        (menu_x + menu_width, menu_y), (menu_x + menu_width, menu_y + menu_height), 2)
+        pygame.draw.line(self.screen, (64, 64, 64), 
+                        (menu_x, menu_y + menu_height), (menu_x + menu_width, menu_y + menu_height), 2)
+        
+        # Рисуем элементы меню
+        self.context_menu_rects = []
+        current_y = menu_y + padding
+        
+        for i, item in enumerate(self.context_menu_items):
+            if item == "---":  # Separator
+                sep_y = current_y + separator_height // 2
+                pygame.draw.line(self.screen, self.BUTTON_SHADOW, 
+                                (menu_x + padding, sep_y), (menu_x + menu_width - padding, sep_y), 1)
+                pygame.draw.line(self.screen, self.BUTTON_HIGHLIGHT, 
+                                (menu_x + padding, sep_y + 1), (menu_x + menu_width - padding, sep_y + 1), 1)
+                current_y += separator_height
+                self.context_menu_rects.append(None)
+            else:
+                item_rect = pygame.Rect(menu_x + 2, current_y, menu_width - 4, item_height)
+                self.context_menu_rects.append(item_rect)
+                
+                # Подсветка при наведении
+                if i == self.context_menu_hover_index:
+                    pygame.draw.rect(self.screen, self.CONTEXT_MENU_HOVER, item_rect)
+                    text_color = self.CONTEXT_MENU_TEXT_HOVER
+                else:
+                    text_color = self.BUTTON_TEXT
+                
+                # Текст элемента
+                text_surf = menu_font.render(item, True, text_color)
+                self.screen.blit(text_surf, (menu_x + padding * 2, current_y + 3))
+                
+                current_y += item_height
+    
+    def show_context_menu(self, pos, target_type, target_data):
+        """НОВОЕ: Показывает контекстное меню"""
+        self.context_menu_visible = True
+        self.context_menu_pos = pos
+        self.context_menu_target = (target_type, target_data)
+        self.context_menu_hover_index = -1
+        
+        # Формируем пункты меню в зависимости от типа цели
+        if target_type == 'image':
+            self.context_menu_items = [
+                "Просмотреть в полном размере",
+                "Скачать изображение"
+            ]
+        elif target_type == 'link':
+            self.context_menu_items = [
+                "Перейти по ссылке",
+                "Скопировать ссылку"
+            ]
+        elif target_type == 'indicator':
+            self.context_menu_items = [
+                "Закладки",
+                "Отладочная информация",
+                "---",
+                "Закрыть браузер"
+            ]
+        else:
+            self.context_menu_items = []
+    
+    def hide_context_menu(self):
+        """НОВОЕ: Скрывает контекстное меню"""
+        self.context_menu_visible = False
+        self.context_menu_items = []
+        self.context_menu_rects = []
+        self.context_menu_hover_index = -1
+        self.context_menu_target = None
+    
+    def handle_context_menu_click(self, item_index):
+        """НОВОЕ: Обрабатывает клик по пункту контекстного меню"""
+        if not self.context_menu_target:
+            return
+        
+        target_type, target_data = self.context_menu_target
+        item_text = self.context_menu_items[item_index]
+        
+        if target_type == 'image':
+            if item_text == "Просмотреть в полном размере":
+                self.show_image_popup(target_data)
+            elif item_text == "Скачать изображение":
+                self.download_image(target_data)
+        
+        elif target_type == 'link':
+            if item_text == "Перейти по ссылке":
+                self.load_page(target_data)
+            elif item_text == "Скопировать ссылку":
+                try:
+                    pyperclip.copy(target_data)
+                    self.status_message = f"Ссылка скопирована: {target_data}"
+                except Exception as e:
+                    self.status_message = f"Ошибка копирования: {str(e)}"
+        
+        elif target_type == 'indicator':
+            if item_text == "Закладки":
+                self.show_bookmarks_popup()
+            elif item_text == "Отладочная информация":
+                self.show_debug_popup()
+            elif item_text == "Закрыть браузер":
+                pygame.quit()
+                sys.exit()
+        
+        self.hide_context_menu()
+    
+    def download_image(self, image_data):
+        """НОВОЕ: Скачивает изображение в папку загрузок"""
+        try:
+            img_url, img_surface = image_data
+            
+            # Определяем папку загрузок
+            home_dir = os.path.expanduser("~")
+            downloads_dir = os.path.join(home_dir, "Downloads")
+            
+            # Создаем папку если не существует
+            if not os.path.exists(downloads_dir):
+                os.makedirs(downloads_dir)
+            
+            # Генерируем случайное имя с префиксом alternet_
+            random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            
+            # Определяем расширение из URL
+            parsed_url = urlparse(img_url)
+            ext = os.path.splitext(parsed_url.path)[1]
+            if not ext or ext not in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
+                ext = '.png'  # По умолчанию PNG
+            
+            filename = f"alternet_{random_suffix}{ext}"
+            filepath = os.path.join(downloads_dir, filename)
+            
+            # Сохраняем изображение
+            pygame.image.save(img_surface, filepath)
+            
+            self.status_message = f"Изображение сохранено: {filename}"
+        except Exception as e:
+            self.status_message = f"Ошибка сохранения: {str(e)}"
+    
+    def show_image_popup(self, image_data):
+        """НОВОЕ: Показывает попап с изображением"""
+        self.popup_active = True
+        self.popup_type = 'image'
+        self.popup_data = image_data
+    
+    def show_debug_popup(self):
+        """НОВОЕ: Показывает попап с отладочной информацией"""
+        self.popup_active = True
+        self.popup_type = 'debug'
+        
+        # Собираем отладочную информацию
+        debug_info = {}
+        
+        # IP адрес
+        try:
+            # Локальный IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            debug_info['local_ip'] = local_ip
+        except:
+            debug_info['local_ip'] = "Недоступно"
+        
+        # Внешний IP
+        try:
+            response = requests.get('https://api.ipify.org?format=text', timeout=3)
+            debug_info['external_ip'] = response.text
+        except:
+            debug_info['external_ip'] = "Недоступно"
+        
+        # Статус подключения
+        try:
+            requests.get('https://www.google.com', timeout=3)
+            debug_info['connection'] = "Подключено"
+        except:
+            debug_info['connection'] = "Нет подключения"
+        
+        # Текущий URL
+        debug_info['current_url'] = self.current_url
+        
+        # Размер кэша
+        debug_info['cache_size'] = len(self.image_cache)
+        
+        # Информация о памяти pygame
+        debug_info['screen_size'] = f"{self.screen_width}x{self.screen_height}"
+        debug_info['scroll_offset'] = self.scroll_offset
+        debug_info['max_scroll'] = self.max_scroll
+        
+        self.popup_data = debug_info
+    
+    def draw_popup(self):
+        """НОВОЕ: Рисует активный попап"""
+        if not self.popup_active:
+            return
+        
+        # Полупрозрачный оверлей
+        overlay = pygame.Surface((self.screen_width, self.screen_height))
+        overlay.set_alpha(200)
+        overlay.fill((0, 0, 0))
+        self.screen.blit(overlay, (0, 0))
+        
+        if self.popup_type == 'image':
+            self.draw_image_popup()
+        elif self.popup_type == 'debug':
+            self.draw_debug_popup()
+        elif self.popup_type == 'bookmarks':
+            self.draw_bookmarks_popup()
+    
+    def draw_image_popup(self):
+        """НОВОЕ: Рисует попап с изображением"""
+        img_url, img_surface = self.popup_data
+        
+        # Максимальный размер изображения (80% экрана)
+        max_width = int(self.screen_width * 0.8)
+        max_height = int(self.screen_height * 0.8)
+        
+        # Масштабируем если нужно
+        img_width, img_height = img_surface.get_size()
+        
+        scale_x = max_width / img_width if img_width > max_width else 1
+        scale_y = max_height / img_height if img_height > max_height else 1
+        scale = min(scale_x, scale_y)
+        
+        if scale < 1:
+            new_width = int(img_width * scale)
+            new_height = int(img_height * scale)
+            scaled_img = pygame.transform.scale(img_surface, (new_width, new_height))
+        else:
+            scaled_img = img_surface
+            new_width, new_height = img_width, img_height
+        
+        # Центрируем
+        img_x = (self.screen_width - new_width) // 2
+        img_y = (self.screen_height - new_height) // 2
+        
+        # Белый фон под изображением
+        bg_padding = 10
+        bg_rect = pygame.Rect(img_x - bg_padding, img_y - bg_padding, 
+                             new_width + bg_padding * 2, new_height + bg_padding * 2)
+        pygame.draw.rect(self.screen, (255, 255, 255), bg_rect)
+        pygame.draw.rect(self.screen, (0, 0, 0), bg_rect, 2)
+        
+        # Рисуем изображение
+        self.screen.blit(scaled_img, (img_x, img_y))
+        
+        # Подсказка внизу
+        hint_text = "Нажмите ESC или кликните для закрытия"
+        hint_surf = self.fonts['normal'].render(hint_text, True, (255, 255, 255))
+        hint_rect = hint_surf.get_rect(center=(self.screen_width // 2, self.screen_height - 30))
+        self.screen.blit(hint_surf, hint_rect)
+    
+    def draw_debug_popup(self):
+        """НОВОЕ: Рисует попап с отладочной информацией"""
+        debug_info = self.popup_data
+        
+        # Размеры окна
+        popup_width = 500
+        popup_height = 400
+        popup_x = (self.screen_width - popup_width) // 2
+        popup_y = (self.screen_height - popup_height) // 2
+        
+        # Фон
+        popup_rect = pygame.Rect(popup_x, popup_y, popup_width, popup_height)
+        pygame.draw.rect(self.screen, (240, 240, 240), popup_rect)
+        pygame.draw.rect(self.screen, (0, 0, 0), popup_rect, 3)
+        
+        # Заголовок
+        title_text = "Отладочная информация"
+        title_surf = self.fonts['debug_title'].render(title_text, True, (0, 0, 100))
+        title_rect = title_surf.get_rect(center=(self.screen_width // 2, popup_y + 30))
+        self.screen.blit(title_surf, title_rect)
+        
+        # Линия под заголовком
+        pygame.draw.line(self.screen, (128, 128, 128), 
+                        (popup_x + 20, popup_y + 55), 
+                        (popup_x + popup_width - 20, popup_y + 55), 2)
+        
+        # Информация
+        info_y = popup_y + 80
+        line_height = 30
+        
+        info_lines = [
+            ("Статус сети:", debug_info.get('connection', 'N/A')),
+            ("Локальный IP:", debug_info.get('local_ip', 'N/A')),
+            ("Внешний IP:", debug_info.get('external_ip', 'N/A')),
+            ("", ""),
+            ("Текущий URL:", debug_info.get('current_url', 'N/A')),
+            ("", ""),
+            ("Размер экрана:", debug_info.get('screen_size', 'N/A')),
+            ("Прокрутка:", f"{debug_info.get('scroll_offset', 0)} / {debug_info.get('max_scroll', 0)}"),
+            ("Изображений в кэше:", str(debug_info.get('cache_size', 0))),
+        ]
+        
+        for label, value in info_lines:
+            if label:
+                label_surf = self.fonts['debug_text'].render(label, True, (0, 0, 0))
+                self.screen.blit(label_surf, (popup_x + 30, info_y))
+                
+                value_surf = self.fonts['debug_text'].render(str(value), True, (0, 0, 128))
+                self.screen.blit(value_surf, (popup_x + 200, info_y))
+            
+            info_y += line_height
+        
+        # Подсказка внизу
+        hint_text = "Нажмите ESC или кликните для закрытия"
+        hint_surf = self.fonts['normal'].render(hint_text, True, (100, 100, 100))
+        hint_rect = hint_surf.get_rect(center=(self.screen_width // 2, popup_y + popup_height - 30))
+        self.screen.blit(hint_surf, hint_rect)
+    
+    def show_bookmarks_popup(self):
+        """НОВОЕ: Показывает попап с закладками"""
+        self.popup_active = True
+        self.popup_type = 'bookmarks'
+        self.popup_data = {
+            'bookmarks': self.bookmark_manager.get_all(),
+            'current_page_title': self.extract_first_h1()
+        }
+        self.bookmark_hover_index = -1
+        self.bookmark_context_menu_index = -1
+    
+    def extract_first_h1(self):
+        """НОВОЕ: Извлекает первый заголовок h1 из текущей страницы"""
+        if not hasattr(self, 'ast') or self.ast is None:
+            return self.current_url
+        
+        def find_h1(node):
+            if node.t == 'heading' and node.level == 1:
+                return self.collect_text(node)
+            
+            child = node.first_child
+            while child:
+                result = find_h1(child)
+                if result:
+                    return result
+                child = child.nxt
+            return None
+        
+        title = find_h1(self.ast)
+        return title if title else self.current_url
+    
+    def draw_bookmarks_popup(self):
+        """НОВОЕ: Рисует попап с закладками в стиле Netscape"""
+        bookmarks = self.popup_data['bookmarks']
+        current_page_title = self.popup_data['current_page_title']
+        
+        # Размеры окна
+        popup_width = 600
+        popup_height = 500
+        popup_x = (self.screen_width - popup_width) // 2
+        popup_y = (self.screen_height - popup_height) // 2
+        
+        # Фон (ретро серый)
+        popup_rect = pygame.Rect(popup_x, popup_y, popup_width, popup_height)
+        pygame.draw.rect(self.screen, (192, 192, 192), popup_rect)
+        
+        # 3D границы как в Netscape
+        pygame.draw.line(self.screen, (223, 223, 223),
+                        (popup_x, popup_y), (popup_x + popup_width, popup_y), 2)
+        pygame.draw.line(self.screen, (223, 223, 223),
+                        (popup_x, popup_y), (popup_x, popup_y + popup_height), 2)
+        pygame.draw.line(self.screen, (64, 64, 64),
+                        (popup_x + popup_width, popup_y), (popup_x + popup_width, popup_y + popup_height), 2)
+        pygame.draw.line(self.screen, (64, 64, 64),
+                        (popup_x, popup_y + popup_height), (popup_x + popup_width, popup_y + popup_height), 2)
+        
+        # Заголовок
+        title_text = "Закладки Alternet"
+        title_surf = self.fonts['bookmark_title'].render(title_text, True, (0, 0, 0))
+        title_x = popup_x + (popup_width - title_surf.get_width()) // 2
+        self.screen.blit(title_surf, (title_x, popup_y + 15))
+        
+        # Линия под заголовком
+        pygame.draw.line(self.screen, (128, 128, 128),
+                        (popup_x + 10, popup_y + 45),
+                        (popup_x + popup_width - 10, popup_y + 45), 1)
+        pygame.draw.line(self.screen, (255, 255, 255),
+                        (popup_x + 10, popup_y + 46),
+                        (popup_x + popup_width - 10, popup_y + 46), 1)
+        
+        # Область списка закладок
+        list_y = popup_y + 55
+        list_height = popup_height - 120
+        list_rect = pygame.Rect(popup_x + 10, list_y, popup_width - 20, list_height)
+        
+        # Белый фон списка с вдавленной рамкой
+        pygame.draw.rect(self.screen, (255, 255, 255), list_rect)
+        pygame.draw.line(self.screen, (64, 64, 64),
+                        (list_rect.left, list_rect.top), (list_rect.right, list_rect.top), 1)
+        pygame.draw.line(self.screen, (64, 64, 64),
+                        (list_rect.left, list_rect.top), (list_rect.left, list_rect.bottom), 1)
+        pygame.draw.line(self.screen, (223, 223, 223),
+                        (list_rect.right, list_rect.top), (list_rect.right, list_rect.bottom), 1)
+        pygame.draw.line(self.screen, (223, 223, 223),
+                        (list_rect.left, list_rect.bottom), (list_rect.right, list_rect.bottom), 1)
+        
+        # Рисуем закладки
+        if bookmarks:
+            item_height = 40
+            y_offset = list_y + 5
+            
+            for i, bookmark in enumerate(bookmarks):
+                item_y = y_offset + i * item_height
+                
+                # Проверяем, что элемент видим
+                if item_y + item_height > list_y + list_height:
+                    break
+                
+                item_rect = pygame.Rect(list_rect.left + 5, item_y, list_rect.width - 10, item_height - 2)
+                
+                # Подсветка при наведении
+                mouse_pos = pygame.mouse.get_pos()
+                is_hover = item_rect.collidepoint(mouse_pos)
+                
+                if is_hover:
+                    pygame.draw.rect(self.screen, (200, 220, 255), item_rect)
+                    self.bookmark_hover_index = i
+                
+                # Заголовок закладки
+                title_text = bookmark['title'][:60]
+                title_surf = self.fonts['bookmark_item'].render(title_text, True, (0, 0, 0))
+                self.screen.blit(title_surf, (item_rect.left + 5, item_rect.top + 5))
+                
+                # URL закладки (серым, мелким шрифтом)
+                url_text = bookmark['url'][:70]
+                url_surf = self.fonts['bookmark_url'].render(url_text, True, (100, 100, 100))
+                self.screen.blit(url_surf, (item_rect.left + 5, item_rect.top + 22))
+                
+                # Сохраняем rect для обработки кликов
+                if not hasattr(self, 'bookmark_rects'):
+                    self.bookmark_rects = []
+                if i >= len(self.bookmark_rects):
+                    self.bookmark_rects.append(item_rect)
+                else:
+                    self.bookmark_rects[i] = item_rect
+        else:
+            # Если закладок нет
+            empty_text = "Нет сохраненных закладок"
+            empty_surf = self.fonts['bookmark_item'].render(empty_text, True, (128, 128, 128))
+            empty_rect = empty_surf.get_rect(center=(popup_x + popup_width // 2, list_y + list_height // 2))
+            self.screen.blit(empty_surf, empty_rect)
+            self.bookmark_rects = []
+        
+        # Кнопка "Добавить текущую страницу"
+        button_width = 250
+        button_height = 30
+        button_x = popup_x + (popup_width - button_width) // 2
+        button_y = popup_y + popup_height - 50
+        
+        add_button_rect = pygame.Rect(button_x, button_y, button_width, button_height)
+        
+        # Рисуем кнопку
+        self.draw_3d_rectangle(add_button_rect, is_pressed=False)
+        button_text = "Добавить текущую страницу"
+        button_surf = self.fonts['bookmark_button'].render(button_text, True, (0, 0, 0))
+        button_text_rect = button_surf.get_rect(center=add_button_rect.center)
+        self.screen.blit(button_surf, button_text_rect)
+        
+        # Сохраняем rect кнопки
+        self.add_bookmark_button_rect = add_button_rect
+        
+        # Подсказка
+        hint_text = "Клик - открыть, Правый клик - удалить, ESC - закрыть"
+        hint_surf = self.fonts['bookmark_url'].render(hint_text, True, (80, 80, 80))
+        hint_rect = hint_surf.get_rect(center=(popup_x + popup_width // 2, popup_y + popup_height - 15))
+        self.screen.blit(hint_surf, hint_rect)
+    
+    def hide_popup(self):
+        """НОВОЕ: Скрывает попап"""
+        self.popup_active = False
+        self.popup_type = None
+        self.popup_data = None
+        self.bookmark_hover_index = -1
+        self.bookmark_context_menu_index = -1
+        if hasattr(self, 'bookmark_rects'):
+            self.bookmark_rects = []
+    
     def load_page(self, url):
         """Загружает страницу по URL с явным указанием UTF-8 кодировки"""
         # Сохраняем текущий URL в истории, если это не переход "вперед"
@@ -339,67 +913,66 @@ class AlternetExplorer:
             self.back_stack.append(self.current_url)
             self.forward_stack = []  # Очищаем стек "вперед" при новом переходе
         
-        try:
-            self.loading = True
-            self.status_message = f"Загрузка: {url}"
-            # Обновляем интерфейс, чтобы показать статус
-            self.render_page()
-            
-            print(f"Загрузка: {url}")
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
-            
-            # Устанавливаем кодировку UTF-8
-            response.encoding = 'utf-8'
-            
-            self.current_url = url
-            self.url_input = url  # Обновляем строку ввода
-            self.markdown_text = response.text
-            
-            # Проверка и исправление кодировки
+        # ИСПРАВЛЕНО: Запускаем загрузку в отдельном потоке для непрерывной анимации
+        def load_thread():
             try:
-                self.markdown_text = self.markdown_text.encode('latin1').decode('utf-8', 'replace')
-            except:
-                pass
-            
-            self.ast = self.parser.parse(self.markdown_text)
-            
-            # ДИАГНОСТИКА: логируем структуру AST
-            print("\n[AST] Структура документа:")
-            self._debug_ast(self.ast, 0)
-            
-            self.scroll_offset = 0
-            self.max_scroll = 0
-            self.loading = False
-            self.status_message = "Страница загружена"
-            self.render_page()
-        except requests.exceptions.ConnectionError:
-            self.loading = False
-            self.status_message = "Ошибка: Нет подключения к интернету"
-            error_msg = "# Ошибка подключения\n\nНет подключения к интернету.\nПроверьте сетевое соединение и повторите попытку."
-            self.markdown_text = error_msg
-            self.ast = self.parser.parse(self.markdown_text)
-            self.scroll_offset = 0
-            self.max_scroll = 0
-            self.render_page()
-        except requests.exceptions.Timeout:
-            self.loading = False
-            self.status_message = "Ошибка: Таймаут подключения"
-            error_msg = "# Ошибка подключения\n\nТаймаут подключения.\nПопробуйте повторить запрос позже."
-            self.markdown_text = error_msg
-            self.ast = self.parser.parse(self.markdown_text)
-            self.scroll_offset = 0
-            self.max_scroll = 0
-            self.render_page()
-        except Exception as e:
-            self.loading = False
-            self.status_message = f"Ошибка: {str(e)}"
-            error_msg = f"# Ошибка\n\nНе удалось загрузить страницу:\n{str(e)}"
-            self.markdown_text = error_msg
-            self.ast = self.parser.parse(self.markdown_text)
-            self.scroll_offset = 0
-            self.max_scroll = 0
-            self.render_page()
+                self.loading = True
+                self.status_message = f"Загрузка: {url}"
+                
+                print(f"Загрузка: {url}")
+                response = requests.get(url, timeout=15)
+                response.raise_for_status()
+                
+                # Устанавливаем кодировку UTF-8
+                response.encoding = 'utf-8'
+                
+                self.current_url = url
+                self.url_input = url  # Обновляем строку ввода
+                self.markdown_text = response.text
+                
+                # Проверка и исправление кодировки
+                try:
+                    self.markdown_text = self.markdown_text.encode('latin1').decode('utf-8', 'replace')
+                except:
+                    pass
+                
+                self.ast = self.parser.parse(self.markdown_text)
+                
+                # ДИАГНОСТИКА: логируем структуру AST
+                print("\n[AST] Структура документа:")
+                self._debug_ast(self.ast, 0)
+                
+                self.scroll_offset = 0
+                self.max_scroll = 0
+                self.loading = False
+                self.status_message = "Страница загружена"
+            except requests.exceptions.ConnectionError:
+                self.loading = False
+                self.status_message = "Ошибка: Нет подключения к интернету"
+                error_msg = "# Ошибка подключения\n\nНет подключения к интернету.\nПроверьте сетевое соединение и повторите попытку."
+                self.markdown_text = error_msg
+                self.ast = self.parser.parse(self.markdown_text)
+                self.scroll_offset = 0
+                self.max_scroll = 0
+            except requests.exceptions.Timeout:
+                self.loading = False
+                self.status_message = "Ошибка: Таймаут подключения"
+                error_msg = "# Ошибка подключения\n\nТаймаут подключения.\nПопробуйте повторить запрос позже."
+                self.markdown_text = error_msg
+                self.ast = self.parser.parse(self.markdown_text)
+                self.scroll_offset = 0
+                self.max_scroll = 0
+            except Exception as e:
+                self.loading = False
+                self.status_message = f"Ошибка: {str(e)}"
+                error_msg = f"# Ошибка\n\nНе удалось загрузить страницу:\n{str(e)}"
+                self.markdown_text = error_msg
+                self.ast = self.parser.parse(self.markdown_text)
+                self.scroll_offset = 0
+                self.max_scroll = 0
+        
+        # Запускаем поток загрузки
+        threading.Thread(target=load_thread, daemon=True).start()
     
     def _debug_ast(self, node, level):
         """Отладочный метод для визуализации структуры AST"""
@@ -419,7 +992,7 @@ class AlternetExplorer:
             child = child.nxt
     
     def load_image(self, url, base_url):
-        """ИСПРАВЛЕНО: Универсальная загрузка изображений с поддержкой редиректов http→https"""
+        """Универсальная загрузка изображений с поддержкой редиректов http→https"""
         # Обработка относительных URL
         if url.startswith('//'):
             # Обработка протокол-относительных URL
@@ -462,8 +1035,8 @@ class AlternetExplorer:
                     attempt_url,
                     headers=headers,
                     timeout=10,
-                    allow_redirects=True,  # Явно следуем редиректам
-                    stream=False  # Загружаем полностью
+                    allow_redirects=True,
+                    stream=False
                 )
                 
                 response.raise_for_status()
@@ -473,12 +1046,12 @@ class AlternetExplorer:
                 if final_url != attempt_url:
                     print(f"[IMAGE] Редирект: {attempt_url} → {final_url}")
                 
-                # ИСПРАВЛЕНО: Проверка MIME-типа стала мягкой
+                # Проверка MIME-типа стала мягкой
                 content_type = response.headers.get('Content-Type', '').lower()
                 print(f"[IMAGE] Content-Type: {content_type}")
                 
                 # Определяем по расширению файла (используем финальный URL)
-                ext = os.path.splitext(final_url.split('?')[0])[1].lower()  # Убираем query параметры
+                ext = os.path.splitext(final_url.split('?')[0])[1].lower()
                 
                 # Если расширение валидное - игнорируем MIME-тип
                 is_valid_extension = ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.ico']
@@ -500,17 +1073,17 @@ class AlternetExplorer:
             except requests.exceptions.SSLError as e:
                 print(f"[IMAGE] SSL ошибка для {attempt_url}: {str(e)}")
                 last_error = e
-                continue  # Пробуем следующий URL
+                continue
                 
             except requests.exceptions.RequestException as e:
                 print(f"[IMAGE] Сетевая ошибка для {attempt_url}: {str(e)}")
                 last_error = e
-                continue  # Пробуем следующий URL
+                continue
                 
             except Exception as e:
                 print(f"[IMAGE] Ошибка обработки {attempt_url}: {str(e)}")
                 last_error = e
-                continue  # Пробуем следующий URL
+                continue
         
         # Если все попытки провалились - создаем заглушку
         print(f"[IMAGE] ВСЕ ПОПЫТКИ ПРОВАЛИЛИСЬ для {url}")
@@ -565,7 +1138,7 @@ class AlternetExplorer:
         except Exception as text_error:
             print(f"[IMAGE] Ошибка при создании заглушки: {text_error}")
         
-        # НЕ КЕШИРУЕМ заглушки - при следующем рендере попробуем снова
+        # НЕ КЕШИРУЕМ заглушки
         return img, full_url
     
     def wrap_text(self, text, font, max_width):
@@ -581,7 +1154,6 @@ class AlternetExplorer:
         current_line = words[0]
         
         for word in words[1:]:
-            # Проверяем, поместится ли слово в текущую строку
             test_line = current_line + ' ' + word
             if font.size(test_line)[0] <= max_width:
                 current_line = test_line
@@ -600,7 +1172,6 @@ class AlternetExplorer:
         self.max_scroll = max(self.max_scroll, y + 100)
         
         if node.t == 'document':
-            # Обработка дочерних узлов документа
             child = node.first_child
             while child:
                 y = self.render_node(child, base_url, x, y, screen)
@@ -608,46 +1179,38 @@ class AlternetExplorer:
             return y
         
         elif node.t == 'heading':
-            level = min(node.level, 3)  # Поддерживаем только h1-h3
+            level = min(node.level, 3)
             font_key = f'h{level}'
             font = self.fonts[font_key]
             
-            # Собираем текст заголовка
             text = self.collect_text(node)
             lines = self.wrap_text(text, font, self.screen_width - 40)
             
-            # Добавляем отступ перед заголовком
             y += 20 if level == 1 else 15 if level == 2 else 10
             
-            # Отрисовка
             for line in lines:
                 try:
                     rendered = font.render(line, True, self.TEXT_COLOR)
                     screen_y = y - self.scroll_offset
-                    # Рисуем только если видимо
                     if screen_y + rendered.get_height() > 0 and screen_y < self.screen_height:
                         screen.blit(rendered, (x, screen_y))
                     y += rendered.get_height() + 3
                 except:
                     pass
             
-            # Добавляем отступ после заголовка
             y += 15 if level == 1 else 10 if level == 2 else 5
-            
             return y
         
         elif node.t == 'paragraph':
             font = self.fonts['normal']
-            y += 10  # Отступ перед параграфом
+            y += 10
             y = self.render_inline(node, base_url, x, y, screen, font)
-            y += 10  # Отступ после параграфа
+            y += 10
             return y
         
         elif node.t == 'block_quote':
-            # Цитата с отступом и фоном
             y += 15
             
-            # Сначала определяем высоту цитаты
             quote_height = 0
             temp_y = y
             child = node.first_child
@@ -657,18 +1220,14 @@ class AlternetExplorer:
                     quote_height = max(quote_height, temp_y - y)
                 child = child.nxt
             
-            # ИСПРАВЛЕНО: используем логические координаты для фона
             screen_y = y - self.scroll_offset
-            # Рисуем фон цитаты только если видимо
             if screen_y + quote_height + 10 > 0 and screen_y - 5 < self.screen_height:
                 pygame.draw.rect(screen, self.QUOTE_BG, 
                                (x - 10, screen_y - 5, self.screen_width - 40, quote_height + 10))
-                # Рисуем левую границу
                 pygame.draw.line(screen, self.LINK_COLOR, 
                                (x - 5, screen_y - 5), 
                                (x - 5, screen_y + quote_height + 5), 2)
             
-            # Теперь рисуем содержимое цитаты
             child = node.first_child
             while child:
                 if child.t == 'paragraph':
@@ -679,7 +1238,6 @@ class AlternetExplorer:
             return y
         
         elif node.t == 'list':
-            # Списки
             is_ordered = node.list_data['type'] == 'ordered'
             item_number = 1
             
@@ -688,7 +1246,6 @@ class AlternetExplorer:
             child = node.first_child
             while child:
                 if child.t == 'item':
-                    # Маркер списка
                     marker = f"{item_number}." if is_ordered else "•"
                     try:
                         marker_surf = self.fonts['normal'].render(marker, True, self.TEXT_COLOR)
@@ -698,7 +1255,6 @@ class AlternetExplorer:
                     except:
                         pass
                     
-                    # Содержимое пункта
                     y = self.render_node(child, base_url, x + 30, y, screen)
                     
                     if is_ordered:
@@ -709,7 +1265,6 @@ class AlternetExplorer:
             return y
         
         elif node.t == 'item':
-            # Пункт списка
             child = node.first_child
             while child:
                 y = self.render_node(child, base_url, x, y, screen)
@@ -717,19 +1272,15 @@ class AlternetExplorer:
             return y + 5
         
         elif node.t == 'code_block':
-            # Блок кода
             y += 15
             
             font = self.fonts['code']
             text = node.literal.strip()
             lines = text.split('\n')
             
-            # Вычисляем высоту блока
             block_height = len(lines) * (font.get_height() + 2) + 10
             
-            # ИСПРАВЛЕНО: используем логические координаты для фона
             screen_y = y - self.scroll_offset
-            # Рисуем фон только если видимо
             if screen_y + block_height > 0 and screen_y - 5 < self.screen_height:
                 pygame.draw.rect(screen, (245, 245, 245), 
                                (x - 10, screen_y - 5, self.screen_width - 40, block_height))
@@ -750,7 +1301,6 @@ class AlternetExplorer:
             return y
         
         elif node.t == 'thematic_break':
-            # Горизонтальная линия
             screen_y = y - self.scroll_offset
             if screen_y > 0 and screen_y < self.screen_height:
                 pygame.draw.line(screen, (128, 128, 128), 
@@ -762,20 +1312,14 @@ class AlternetExplorer:
             return y + 20
         
         elif node.t == 'image':
-            # ИСПРАВЛЕНО: ИЗОБРАЖЕНИЕ С ПРАВИЛЬНЫМ ПОЗИЦИОНИРОВАНИЕМ
             y += 15
             
-            # Загружаем изображение
             img, full_url = self.load_image(node.destination, base_url)
             
             if img:
-                # Максимальная ширина изображения
                 max_width = self.screen_width - 60
-                
-                # Определяем текущие размеры изображения
                 img_width, img_height = img.get_size()
                 
-                # Масштабируем изображение, если оно слишком широкое
                 if img_width > max_width:
                     scale_factor = max_width / img_width
                     new_width = int(img_width * scale_factor)
@@ -783,26 +1327,20 @@ class AlternetExplorer:
                     img = pygame.transform.scale(img, (new_width, new_height))
                     img_width, img_height = new_width, new_height
                 
-                # ИСПРАВЛЕНО: проверяем видимость ПЕРЕД отрисовкой
                 screen_y = y - self.scroll_offset
                 is_visible = (screen_y + img_height > 0 and screen_y < self.screen_height)
                 
                 if is_visible:
-                    # Рисуем рамку вокруг изображения
                     pygame.draw.rect(screen, self.IMAGE_BORDER_COLOR, 
                                    (x, screen_y, img_width, img_height), 1)
-                    
-                    # Рисуем изображение
                     screen.blit(img, (x, screen_y))
                 
-                # НЕ ДОБАВЛЯЕМ изображения в active_areas - они не должны быть кликабельными для навигации
-                # img_rect = pygame.Rect(x, y, img_width, img_height)
-                # self.active_areas.append((img_rect, full_url))
+                # НОВОЕ: Сохраняем область изображения для контекстного меню
+                img_rect = pygame.Rect(x, y, img_width, img_height)
+                self.image_areas.append((img_rect, full_url, img))
                 
-                # Обновляем позицию Y
                 y += img_height + 10
             
-            # Добавляем подпись к изображению
             if node.title or node.destination:
                 font = self.fonts['image_caption']
                 alt_text = node.title if node.title else os.path.basename(node.destination)
@@ -821,7 +1359,6 @@ class AlternetExplorer:
             y += 10
             return y
         
-        # Обработка других типов узлов
         child = node.first_child
         while child:
             y = self.render_node(child, base_url, x, y, screen)
@@ -830,7 +1367,7 @@ class AlternetExplorer:
         return y
     
     def render_inline(self, node, base_url, x, y, screen, base_font):
-        """ИСПРАВЛЕНО: Отрисовывает инлайновые элементы с правильными переносами"""
+        """Отрисовывает инлайновые элементы с правильными переносами"""
         current_x = x
         max_width = self.screen_width - 40
         line_height = base_font.get_height()
@@ -843,7 +1380,6 @@ class AlternetExplorer:
                 
                 for word in words:
                     try:
-                        # Добавляем пробел перед словом, если это не начало строки
                         if current_x > x:
                             word_with_space = ' ' + word
                         else:
@@ -851,15 +1387,12 @@ class AlternetExplorer:
                         
                         word_width = base_font.size(word_with_space)[0]
                         
-                        # Проверяем, помещается ли слово
                         if current_x + word_width > x + max_width and current_x > x:
-                            # Переносим на новую строку
                             y += line_height
                             current_x = x
                             word_with_space = word
                             word_width = base_font.size(word_with_space)[0]
                         
-                        # Рисуем слово
                         rendered = base_font.render(word_with_space, True, self.TEXT_COLOR)
                         screen_y = y - self.scroll_offset
                         
@@ -879,7 +1412,6 @@ class AlternetExplorer:
                 current_x = x
             
             elif child.t == 'link':
-                # ИСПРАВЛЕНО: Ссылка с правильной обработкой переносов
                 url = child.destination
                 link_text = self.collect_text(child)
                 words = link_text.split()
@@ -893,7 +1425,6 @@ class AlternetExplorer:
                         
                         word_width = self.fonts['link'].size(word_with_space)[0]
                         
-                        # Проверяем перенос
                         if current_x + word_width > x + max_width and current_x > x:
                             y += line_height
                             current_x = x
@@ -903,7 +1434,6 @@ class AlternetExplorer:
                         rendered = self.fonts['link'].render(word_with_space, True, self.LINK_COLOR)
                         screen_y = y - self.scroll_offset
                         
-                        # ИСПРАВЛЕНО: Сохраняем область в ЛОГИЧЕСКИХ координатах
                         rect = pygame.Rect(current_x, y, word_width, line_height)
                         self.active_areas.append((rect, url))
                         
@@ -915,7 +1445,6 @@ class AlternetExplorer:
                         print(f"Ошибка отрисовки ссылки: {e}")
             
             elif child.t == 'strong':
-                # Жирный текст
                 bold_font = pygame.font.SysFont('MS Sans Serif, Arial', base_font.get_height(), bold=True)
                 text = self.collect_text(child)
                 words = text.split()
@@ -946,7 +1475,6 @@ class AlternetExplorer:
                         pass
             
             elif child.t == 'emph':
-                # Курсив
                 italic_font = pygame.font.SysFont('MS Sans Serif, Arial', base_font.get_height(), italic=True)
                 text = self.collect_text(child)
                 words = text.split()
@@ -977,25 +1505,18 @@ class AlternetExplorer:
                         pass
             
             elif child.t == 'image':
-                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Обработка инлайн-изображений
                 print(f"[INLINE IMAGE] Обнаружено изображение: {child.destination}")
                 
-                # Если изображение не в начале строки, переходим на новую строку
                 if current_x > x:
                     y += line_height
                     current_x = x
                 
-                # Загружаем изображение
                 img, full_url = self.load_image(child.destination, base_url)
                 
                 if img:
-                    # Максимальная ширина изображения
                     max_img_width = max_width
-                    
-                    # Определяем размеры
                     img_width, img_height = img.get_size()
                     
-                    # Масштабируем если нужно
                     if img_width > max_img_width:
                         scale_factor = max_img_width / img_width
                         new_width = int(img_width * scale_factor)
@@ -1003,27 +1524,22 @@ class AlternetExplorer:
                         img = pygame.transform.scale(img, (new_width, new_height))
                         img_width, img_height = new_width, new_height
                     
-                    # Проверяем видимость
                     screen_y = y - self.scroll_offset
                     is_visible = (screen_y + img_height > 0 and screen_y < self.screen_height)
                     
                     if is_visible:
-                        # Рисуем рамку
                         pygame.draw.rect(screen, self.IMAGE_BORDER_COLOR,
                                        (x, screen_y, img_width, img_height), 1)
-                        # Рисуем изображение
                         screen.blit(img, (x, screen_y))
                         print(f"[INLINE IMAGE] Отрисовано: {img_width}x{img_height} at y={y}")
                     
-                    # НЕ ДОБАВЛЯЕМ изображения в active_areas - они не должны быть кликабельными для навигации
-                    # img_rect = pygame.Rect(x, y, img_width, img_height)
-                    # self.active_areas.append((img_rect, full_url))
+                    # НОВОЕ: Сохраняем область изображения для контекстного меню
+                    img_rect = pygame.Rect(x, y, img_width, img_height)
+                    self.image_areas.append((img_rect, full_url, img))
                     
-                    # Обновляем позицию
                     y += img_height + 10
-                    current_x = x  # Сброс на начало строки
+                    current_x = x
                     
-                    # Подпись к изображению
                     if child.title or child.destination:
                         caption_font = self.fonts['image_caption']
                         alt_text = child.title if child.title else os.path.basename(child.destination)
@@ -1041,7 +1557,6 @@ class AlternetExplorer:
             
             child = child.nxt
         
-        # Если остались элементы на строке, переходим на новую
         if current_x > x:
             y += line_height
         
@@ -1065,12 +1580,10 @@ class AlternetExplorer:
         if self.max_scroll <= self.screen_height - 100:
             return
         
-        # Вычисляем размер ползунка
         visible_height = self.screen_height - 100
         scrollbar_height = max(20, int((visible_height / self.max_scroll) * visible_height))
         scrollbar_pos = int((self.scroll_offset / self.max_scroll) * (visible_height - scrollbar_height))
         
-        # Рисуем фон полосы прокрутки
         scrollbar_rect = pygame.Rect(
             self.screen_width - self.scrollbar_width, 
             50, 
@@ -1079,7 +1592,6 @@ class AlternetExplorer:
         )
         pygame.draw.rect(self.screen, self.SCROLLBAR_BG, scrollbar_rect)
         
-        # Рисуем ползунок
         handle_rect = pygame.Rect(
             self.screen_width - self.scrollbar_width, 
             50 + scrollbar_pos, 
@@ -1088,7 +1600,6 @@ class AlternetExplorer:
         )
         pygame.draw.rect(self.screen, self.SCROLLBAR_HANDLE, handle_rect)
         
-        # 3D эффект для ползунка
         pygame.draw.line(self.screen, self.BUTTON_HIGHLIGHT, 
                         (handle_rect.right, handle_rect.top), 
                         (handle_rect.right, handle_rect.bottom))
@@ -1103,14 +1614,13 @@ class AlternetExplorer:
                         (handle_rect.left, handle_rect.bottom))
     
     def handle_scroll(self, event):
-        """ИСПРАВЛЕНО: Обрабатывает события прокрутки с правильной проверкой кликов"""
+        """Обрабатывает события прокрутки с правильной проверкой кликов"""
         if event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 4:  # Колесо вверх
                 self.scroll_offset = max(0, self.scroll_offset - self.scroll_speed)
             elif event.button == 5:  # Колесо вниз
                 self.scroll_offset = min(self.max_scroll - (self.screen_height - 100), self.scroll_offset + self.scroll_speed)
             elif event.button == 1:  # Левая кнопка
-                # Проверка клика на полосе прокрутки
                 if event.pos[0] > self.screen_width - self.scrollbar_width:
                     visible_height = self.screen_height - 100
                     if self.max_scroll > visible_height:
@@ -1118,9 +1628,7 @@ class AlternetExplorer:
                         scrollbar_pos = (event.pos[1] - 50) / (visible_height - scrollbar_height)
                         self.scroll_offset = int((self.max_scroll - visible_height) * scrollbar_pos)
                         self.scroll_offset = max(0, min(self.max_scroll - visible_height, self.scroll_offset))
-                # Проверка клика на активных областях
                 else:
-                    # ИСПРАВЛЕНО: преобразуем экранные координаты в логические
                     pos = pygame.mouse.get_pos()
                     adjusted_pos = (pos[0], pos[1] + self.scroll_offset)
                     
@@ -1132,10 +1640,13 @@ class AlternetExplorer:
             
             elif event.button == 2:  # Средняя кнопка
                 self.scroll_offset = 0
+            
+            # НОВОЕ: Обработка правой кнопки мыши
+            elif event.button == 3:  # Правая кнопка
+                self.handle_right_click(event.pos)
         
         elif event.type == pygame.MOUSEMOTION:
             if self.dragging_scrollbar and event.buttons[0]:
-                # Перемещаем ползунок
                 dy = event.pos[1] - self.scrollbar_drag_start
                 visible_height = self.screen_height - 100
                 if self.max_scroll > visible_height:
@@ -1146,6 +1657,26 @@ class AlternetExplorer:
         elif event.type == pygame.MOUSEBUTTONUP:
             if event.button == 1:
                 self.dragging_scrollbar = False
+    
+    def handle_right_click(self, pos):
+        """НОВОЕ: Обрабатывает правый клик мыши"""
+        # Проверяем клик на индикатор загрузки
+        if self.loading_indicator_rect.collidepoint(pos):
+            self.show_context_menu(pos, 'indicator', None)
+            return
+        
+        # Проверяем клик на изображение
+        adjusted_pos = (pos[0], pos[1] + self.scroll_offset)
+        for img_rect, img_url, img_surface in self.image_areas:
+            if img_rect.collidepoint(adjusted_pos):
+                self.show_context_menu(pos, 'image', (img_url, img_surface))
+                return
+        
+        # Проверяем клик на ссылку
+        for link_rect, link_url in self.active_areas:
+            if link_rect.collidepoint(adjusted_pos):
+                self.show_context_menu(pos, 'link', link_url)
+                return
     
     def handle_url_input(self, event):
         """Обрабатывает ввод в строку URL"""
@@ -1189,20 +1720,20 @@ class AlternetExplorer:
         toolbar_rect = pygame.Rect(0, 0, self.screen_width, 50)
         pygame.draw.rect(self.screen, (192, 192, 192), toolbar_rect)
         
-        # 3D границы тулбара (как в Windows 95) - ИСПРАВЛЕНО: убрана белая полоска
-        pygame.draw.line(self.screen, (223, 223, 223), (0, 0), (self.screen_width, 0), 1)  # Светло-серая вместо белой
-        pygame.draw.line(self.screen, (128, 128, 128), (0, 49), (self.screen_width, 49), 1)  # Нижняя тень
-        pygame.draw.line(self.screen, (64, 64, 64), (0, 50), (self.screen_width, 50), 1)  # Темная граница
+        # 3D границы тулбара (как в Windows 95)
+        pygame.draw.line(self.screen, (223, 223, 223), (0, 0), (self.screen_width, 0), 1)
+        pygame.draw.line(self.screen, (128, 128, 128), (0, 49), (self.screen_width, 49), 1)
+        pygame.draw.line(self.screen, (64, 64, 64), (0, 50), (self.screen_width, 50), 1)
         
-        # Разделители между кнопками (вертикальные линии в стиле Windows 95)
+        # Разделители между кнопками
         separator_x1 = self.home_button_rect.right + 5
         pygame.draw.line(self.screen, (128, 128, 128), (separator_x1, 8), (separator_x1, 42), 1)
         pygame.draw.line(self.screen, (255, 255, 255), (separator_x1 + 1, 8), (separator_x1 + 1, 42), 1)
         
-        # Кнопки навигации с улучшенными символами
+        # Кнопки навигации
         self.draw_button(self.back_button_rect, "<", enabled=len(self.back_stack) > 0)
         self.draw_button(self.forward_button_rect, ">", enabled=len(self.forward_stack) > 0)
-        self.draw_button(self.home_button_rect, "H", enabled=True)  # ИСПРАВЛЕНО: 'H' вместо unicode символа
+        self.draw_button(self.home_button_rect, "H", enabled=True)
         
         # Строка ввода URL
         self.draw_url_input()
@@ -1217,23 +1748,21 @@ class AlternetExplorer:
         content_rect = pygame.Rect(0, 50, self.screen_width - self.scrollbar_width, self.screen_height - 75)
         pygame.draw.rect(self.screen, self.TEXT_BG, content_rect)
         
-        # КРИТИЧНО: устанавливаем clipping rect для контента
         self.screen.set_clip(content_rect)
         
         # Очищаем активные области
         self.active_areas = []
+        self.image_areas = []  # НОВОЕ: Очищаем области изображений
         
         # Отрисовка содержимого
         y_offset = 60
         if hasattr(self, 'ast') and self.ast is not None:
             self.render_node(self.ast, self.current_url, 20, y_offset, self.screen)
         
-        # КРИТИЧНО: сбрасываем clipping
         self.screen.set_clip(None)
         
-        # Граница области контента (поверх контента, чтобы не обрезалась)
+        # Граница области контента
         pygame.draw.rect(self.screen, self.BORDER_COLOR, content_rect, 2)
-        # Внутренняя тень для 3D эффекта
         pygame.draw.line(self.screen, (64, 64, 64), (1, 51), (content_rect.right - 1, 51), 1)
         pygame.draw.line(self.screen, (64, 64, 64), (1, 51), (1, content_rect.bottom - 1), 1)
         
@@ -1243,7 +1772,7 @@ class AlternetExplorer:
         # Статус-бар
         self.draw_status_bar()
         
-        # Tooltip (рисуется последним, поверх всего)
+        # Tooltip
         if self.tooltip_visible and self.tooltip_hover_button:
             button_tooltips = {
                 'back': 'Назад',
@@ -1263,6 +1792,12 @@ class AlternetExplorer:
                 button_rect = button_rects.get(self.tooltip_hover_button)
                 if button_rect:
                     self.draw_tooltip(tooltip_text, button_rect)
+        
+        # НОВОЕ: Контекстное меню (рисуется поверх всего)
+        self.draw_context_menu()
+        
+        # НОВОЕ: Попапы (рисуются самыми последними)
+        self.draw_popup()
         
         pygame.display.flip()
     
@@ -1285,14 +1820,96 @@ class AlternetExplorer:
                     self.update_layout(event.w, event.h)
                     self.render_page()
                 
+                elif event.type == pygame.KEYDOWN:
+                    # НОВОЕ: ESC закрывает попапы и контекстное меню
+                    if event.key == pygame.K_ESCAPE:
+                        if self.popup_active:
+                            self.hide_popup()
+                            self.render_page()
+                        elif self.context_menu_visible:
+                            self.hide_context_menu()
+                            self.render_page()
+                        else:
+                            self.url_input_active = False
+                    elif self.url_input_active:
+                        self.handle_url_input(event)
+                
                 elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP, pygame.MOUSEWHEEL):
+                    # НОВОЕ: Обработка кликов в попапах
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if self.popup_active:
+                            # Обработка кликов в попапе закладок
+                            if self.popup_type == 'bookmarks':
+                                # Клик по кнопке добавления
+                                if hasattr(self, 'add_bookmark_button_rect') and self.add_bookmark_button_rect.collidepoint(event.pos):
+                                    title = self.extract_first_h1()
+                                    self.bookmark_manager.add(title, self.current_url)
+                                    self.show_bookmarks_popup()  # Обновляем попап
+                                    self.render_page()
+                                    continue
+                                
+                                # Клик по закладке
+                                if hasattr(self, 'bookmark_rects'):
+                                    for i, rect in enumerate(self.bookmark_rects):
+                                        if rect and rect.collidepoint(event.pos):
+                                            bookmarks = self.popup_data['bookmarks']
+                                            if i < len(bookmarks):
+                                                self.hide_popup()
+                                                self.load_page(bookmarks[i]['url'])
+                                                self.render_page()
+                                                continue
+                            
+                            self.hide_popup()
+                            self.render_page()
+                            continue
+                    
+                    # ИСПРАВЛЕНО: Обработка кликов по контекстному меню ТОЛЬКО левой кнопкой
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.context_menu_visible:
+                        clicked_menu_item = False
+                        for i, rect in enumerate(self.context_menu_rects):
+                            if rect and rect.collidepoint(event.pos):
+                                self.handle_context_menu_click(i)
+                                self.render_page()
+                                clicked_menu_item = True
+                                break
+                        
+                        if not clicked_menu_item:
+                            # Клик вне меню - закрываем его
+                            self.hide_context_menu()
+                            self.render_page()
+                        continue
+                    
+                    # НОВОЕ: Обработка правого клика в попапе закладок для удаления
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                        if self.popup_active and self.popup_type == 'bookmarks':
+                            if hasattr(self, 'bookmark_rects'):
+                                for i, rect in enumerate(self.bookmark_rects):
+                                    if rect and rect.collidepoint(event.pos):
+                                        bookmarks = self.popup_data['bookmarks']
+                                        if i < len(bookmarks):
+                                            self.bookmark_manager.remove(bookmarks[i]['url'])
+                                            self.show_bookmarks_popup()  # Обновляем попап
+                                            self.render_page()
+                                            continue
+                    
+                    # НОВОЕ: Обновление hover состояния в контекстном меню
+                    if event.type == pygame.MOUSEMOTION and self.context_menu_visible:
+                        old_hover = self.context_menu_hover_index
+                        self.context_menu_hover_index = -1
+                        for i, rect in enumerate(self.context_menu_rects):
+                            if rect and rect.collidepoint(event.pos):
+                                self.context_menu_hover_index = i
+                                break
+                        if old_hover != self.context_menu_hover_index:
+                            self.render_page()
+                        continue
+                    
                     self.handle_scroll(event)
                     
                     # Обработка движения мыши для tooltip
                     if event.type == pygame.MOUSEMOTION:
                         mouse_pos = pygame.mouse.get_pos()
                         
-                        # Определяем над какой кнопкой мышь
                         current_hover = None
                         if self.back_button_rect.collidepoint(mouse_pos):
                             current_hover = 'back'
@@ -1303,13 +1920,11 @@ class AlternetExplorer:
                         elif self.go_button_rect.collidepoint(mouse_pos):
                             current_hover = 'go'
                         
-                        # Если начали наводить на новую кнопку
                         if current_hover != self.tooltip_hover_button:
                             self.tooltip_hover_button = current_hover
                             self.tooltip_hover_time = current_time
                             self.tooltip_visible = False
                         
-                        # Если навели достаточно долго - показываем tooltip
                         if self.tooltip_hover_button and (current_time - self.tooltip_hover_time) > self.tooltip_delay:
                             self.tooltip_visible = True
                             self.render_page()
@@ -1360,12 +1975,6 @@ class AlternetExplorer:
                                 self.scrollbar_initial_offset = self.scroll_offset
                                 self.scrollbar_drag_start = event.pos[1]
                                 self.dragging_scrollbar = True
-                
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self.url_input_active = False
-                    elif self.url_input_active:
-                        self.handle_url_input(event)
             
             # Мигание курсора
             blink_timer += dt
@@ -1385,6 +1994,85 @@ class AlternetExplorer:
         
         pygame.quit()
         sys.exit()
+
+class BookmarkManager:
+    """НОВОЕ: Менеджер закладок для Alternet Explorer"""
+    def __init__(self):
+        self.alternet_dir = os.path.join(os.path.expanduser("~"), ".alternet")
+        self.bookmarks_file = os.path.join(self.alternet_dir, "bookmarks.json")
+        self._ensure_directory()
+        self.bookmarks = self._load()
+    
+    def _ensure_directory(self):
+        """Создает директорию .alternet если не существует"""
+        if not os.path.exists(self.alternet_dir):
+            try:
+                os.makedirs(self.alternet_dir)
+                print(f"[BOOKMARKS] Создана директория: {self.alternet_dir}")
+            except Exception as e:
+                print(f"[BOOKMARKS] Ошибка создания директории: {e}")
+    
+    def _load(self):
+        """Загружает закладки из файла"""
+        if not os.path.exists(self.bookmarks_file):
+            return []
+        
+        try:
+            with open(self.bookmarks_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                print(f"[BOOKMARKS] Загружено закладок: {len(data)}")
+                return data
+        except Exception as e:
+            print(f"[BOOKMARKS] Ошибка загрузки: {e}")
+            return []
+    
+    def _save(self):
+        """Сохраняет закладки в файл"""
+        try:
+            with open(self.bookmarks_file, 'w', encoding='utf-8') as f:
+                json.dump(self.bookmarks, f, ensure_ascii=False, indent=2)
+                print(f"[BOOKMARKS] Сохранено закладок: {len(self.bookmarks)}")
+        except Exception as e:
+            print(f"[BOOKMARKS] Ошибка сохранения: {e}")
+    
+    def add(self, title, url):
+        """Добавляет новую закладку"""
+        # Проверяем, что URL еще не добавлен
+        for bookmark in self.bookmarks:
+            if bookmark['url'] == url:
+                print(f"[BOOKMARKS] Закладка уже существует: {url}")
+                return False
+        
+        bookmark = {
+            'title': title,
+            'url': url,
+            'added': time.time()
+        }
+        self.bookmarks.append(bookmark)
+        self._save()
+        print(f"[BOOKMARKS] Добавлена закладка: {title}")
+        return True
+    
+    def remove(self, url):
+        """Удаляет закладку по URL"""
+        original_count = len(self.bookmarks)
+        self.bookmarks = [b for b in self.bookmarks if b['url'] != url]
+        
+        if len(self.bookmarks) < original_count:
+            self._save()
+            print(f"[BOOKMARKS] Удалена закладка: {url}")
+            return True
+        return False
+    
+    def get_all(self):
+        """Возвращает все закладки"""
+        return self.bookmarks
+    
+    def clear(self):
+        """Удаляет все закладки"""
+        self.bookmarks = []
+        self._save()
+        print("[BOOKMARKS] Все закладки удалены")
 
 if __name__ == "__main__":
     print("=" * 50)
