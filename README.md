@@ -18,4 +18,4 @@ python3 ae.py
 ```
 
 ## Скриншоты
-![screenshot](https://ionics.neocities.org/alternet/aescreen.jpg)
+![screenshot](https://ionics.neocities.org/alternet/aescreennew.jpg)
