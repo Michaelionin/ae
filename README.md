@@ -1,4 +1,4 @@
-# Alternet Explorer
+# Alternet Explorer 
 Полностью графический браузер для сети АльтерНет
 
 ## Быстрый старт (Debian/Astra/Mint/Ubuntu)  
